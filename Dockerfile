@@ -1,5 +1,7 @@
 # Use Node.js 18 Alpine for smaller image size
 FROM node:18-alpine
+# Install curl for healthcheck
+RUN apk add --no-cache curl
 # Set working directory
 WORKDIR /app
 # Copy package files
@@ -14,11 +16,11 @@ COPY index.js ./
 RUN addgroup -g 1001 -S nodejs && \
   adduser -S nestcron -u 1001
 # Change ownership of app directory
-RUN chown -R nestcron:nodejs /app
-USER nestcron
-# Expose port (for health checks if needed)
+RUN chown -R 
 EXPOSE 3000
-# Health check
+# Health check via HTTP endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "console.log('Health check passed')"
 # Start the application
