@@ -1,12 +1,18 @@
 {
-  "name": "push-worker-cron",
+  "name": "push-notification-cron",
   "version": "1.0.0",
+  "description": "Push notification cron service for Nest by Eden Oasis",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.50.0",
     "node-cron": "^3.0.3",
-    "node-fetch": "^2.6.7"
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
