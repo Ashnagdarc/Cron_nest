@@ -1,33 +1,69 @@
 const cron = require('node-cron');
 const webPush = require('web-push');
 const { createClient } = require('@supabase/supabase-js');
-// Configure VAPID for Web Push
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_MAILTO = process.env.VAPID_MAILTO || 'mailto:noreply@nestbyeden.app';
+
+// ============================================================================
+// ENVIRONMENT VALIDATION
+// ============================================================================
+function validateEnvironment() {
+    const required = [
+        'NEXT_PUBLIC_SUPABASE_URL',
+        'SUPABASE_SERVICE_ROLE_KEY',
+        'VAPID_PRIVATE_KEY',
+        'NEXT_PUBLIC_VAPID_PUBLIC_KEY'
+    ];
+    
+    const missing = required.filter(key => !process.env[key]);
+    
+    if (missing.length > 0) {
+        console.error('[Startup] ❌ Missing required environment variables:', missing.join(', '));
+        process.exit(1);
+    }
+    
+    console.log('[Startup] ✅ All required environment variables are set');
+}
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+const CONFIG = {
+    BATCH_LIMIT: parseInt(process.env.BATCH_LIMIT || '10', 10),
+    RATE_LIMIT_WINDOW: parseInt(process.env.RATE_LIMIT_WINDOW || '60000', 10), // 1 minute in ms
+    RATE_LIMIT_MAX_QUEUE: parseInt(process.env.RATE_LIMIT_MAX_QUEUE || '1000', 10),
+    PORT: parseInt(process.env.PORT || '3000', 10),
+    VAPID_MAILTO: process.env.VAPID_MAILTO || 'mailto:noreply@nestbyeden.app'
+};
+
+// Rate limiting state
+const rateLimitState = {
+    queueSize: 0,
+    lastProcessTime: 0
+};
+
+// Store cron jobs for graceful shutdown
+const cronJobs = [];
 // Configure Web Push
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+if (CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PRIVATE_KEY) {
     try {
         webPush.setVapidDetails(
-            VAPID_MAILTO,
-            VAPID_PUBLIC_KEY,
-            VAPID_PRIVATE_KEY
+            CONFIG.VAPID_MAILTO,
+            CONFIG.VAPID_PUBLIC_KEY,
+            CONFIG.VAPID_PRIVATE_KEY
         );
-        console.log('[Push Worker] VAPID configured successfully');
+        console.log('[Push Worker] ✅ VAPID configured successfully');
     } catch (error) {
-        console.error('[Push Worker] VAPID configuration failed:', error);
+        console.error('[Push Worker] ❌ VAPID configuration failed:', error.message);
+        process.exit(1);
     }
 } else {
-    console.error('[Push Worker] Missing VAPID keys:', {
-        publicKey: !!VAPID_PUBLIC_KEY,
-        privateKey: !!VAPID_PRIVATE_KEY
-    });
+    console.error('[Push Worker] ❌ Missing VAPID keys');
+    process.exit(1);
 }
 // Initialize Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!supabaseUrl || !supabaseServiceKey) {
-    console.error('[Push Worker] Missing Supabase environment variables');
+    console.error('[Startup] ❌ Missing Supabase environment variables');
     process.exit(1);
 }
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
@@ -36,6 +72,10 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
         persistSession: false
     }
 });
+
+// Export CONFIG values for access in functions
+CONFIG.VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+CONFIG.VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 async function markFailed(notificationId, errorMessage) {
     await supabase
         .from('push_notification_queue')
@@ -47,6 +87,15 @@ async function markFailed(notificationId, errorMessage) {
 }
 async function processPushNotifications() {
     try {
+        // Rate limiting check
+        if (rateLimitState.queueSize >= CONFIG.RATE_LIMIT_MAX_QUEUE) {
+            console.warn('[Push Worker] ⚠️ Rate limit: Queue size exceeded', {
+                current: rateLimitState.queueSize,
+                max: CONFIG.RATE_LIMIT_MAX_QUEUE
+            });
+            return { processed: 0, message: 'Rate limit exceeded - queue full' };
+        }
+
         console.log('[Push Worker] Starting queue processing...');
         // Get pending notifications (limit to prevent timeouts)
         const { data: pendingNotifications, error: fetchError } = await supabase
@@ -54,7 +103,7 @@ async function processPushNotifications() {
             .select('*')
             .eq('status', 'pending')
             .order('created_at', { ascending: true })
-            .limit(10); // Process in batches
+            .limit(CONFIG.BATCH_LIMIT); // Use configurable batch limit
         if (fetchError) {
             console.error('[Push Worker] Error fetching pending notifications:', fetchError);
             return { processed: 0, message: 'Failed to fetch pending notifications' };
@@ -63,7 +112,9 @@ async function processPushNotifications() {
             console.log('[Push Worker] No pending notifications to process');
             return { processed: 0, message: 'No pending notifications' };
         }
-        console.log(`[Push Worker] Processing ${pendingNotifications.length} notifications`);
+        // Update rate limit state
+        rateLimitState.queueSize = pendingNotifications.length;
+        console.log(`[Push Worker] Processing ${pendingNotifications.length} notifications (Queue: ${rateLimitState.queueSize}/${CONFIG.RATE_LIMIT_MAX_QUEUE})`);
         let processed = 0;
         let sent = 0;
         let failed = 0;
@@ -176,6 +227,8 @@ async function processPushNotifications() {
             failed,
             message: `Processed ${processed} notifications (${sent} sent, ${failed} failed)`
         };
+        // Update rate limit state after processing
+        rateLimitState.queueSize = Math.max(0, rateLimitState.queueSize - processed);
         console.log(`[Push Worker] Completed:`, result);
         return result;
     } catch (error) {
@@ -303,32 +356,84 @@ async function runDailyNotifications() {
         console.error('[Daily Notifications] Error:', error);
     }
 }
-// Start cron jobs
+// ============================================================================
+// HEALTH CHECK ENDPOINT
+// ============================================================================
+const express = require('express');
+const app = express();
+
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        queueSize: rateLimitState.queueSize,
+        config: {
+            batchLimit: CONFIG.BATCH_LIMIT,
+            rateLimitMaxQueue: CONFIG.RATE_LIMIT_MAX_QUEUE
+        }
+    });
+});
+
+app.get('/ready', (req, res) => {
+    res.status(200).json({ ready: true });
+});
+
+const server = app.listen(CONFIG.PORT, () => {
+    console.log(`[Health Check] Server listening on port ${CONFIG.PORT}`);
+});
+
+// ============================================================================
+// CRON JOBS
+// ============================================================================
 console.log('🚀 Starting push notification cron service...');
+
+// Validate environment before starting crons
+validateEnvironment();
+
 // Process push notifications every minute
-cron.schedule('* * * * *', async () => {
+cronJobs.push(cron.schedule('* * * * *', async () => {
     try {
         const result = await processPushNotifications();
-        console.log('Push worker result:', result);
+        console.log('[Cron] Push worker result:', result);
     } catch (error) {
-        console.error('Push worker cron error:', error);
+        console.error('[Cron] Push worker error:', error.message);
     }
-});
+}));
+
 // Run daily notifications every hour (will check time internally)
-cron.schedule('0 * * * *', async () => {
+cronJobs.push(cron.schedule('0 * * * *', async () => {
     try {
         await runDailyNotifications();
     } catch (error) {
-        console.error('Daily notifications cron error:', error);
+        console.error('[Cron] Daily notifications error:', error.message);
     }
-});
+}));
+
 console.log('✅ All push notification crons started');
-// Keep the process running
-process.on('SIGINT', () => {
-    console.log('🛑 Received SIGINT, shutting down gracefully...');
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    console.log('🛑 Received SIGTERM, shutting down gracefully...');
-    process.exit(0);
-});
+
+// ============================================================================
+// GRACEFUL SHUTDOWN
+// ============================================================================
+function gracefulShutdown() {
+    console.log('🛑 Received shutdown signal, closing gracefully...');
+    
+    // Stop accepting new requests
+    server.close(() => {
+        console.log('✅ HTTP server closed');
+    });
+    
+    // Stop all cron jobs
+    cronJobs.forEach((job, index) => {
+        job.stop();
+        console.log(`✅ Cron job ${index + 1} stopped`);
+    });
+    
+    // Wait for pending operations and exit
+    setTimeout(() => {
+        console.log('✅ Graceful shutdown complete');
+        process.exit(0);
+    }, 5000);
+}
+
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);

@@ -8,9 +8,11 @@ COPY package*.json ./
 RUN npm ci --only=production
 # Copy source code
 COPY index.js ./
+# Use secrets from runtime environment, not build args
+# Build args are removed to avoid secrets in image history
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nestcron -u 1001
+  adduser -S nestcron -u 1001
 # Change ownership of app directory
 RUN chown -R nestcron:nodejs /app
 USER nestcron
