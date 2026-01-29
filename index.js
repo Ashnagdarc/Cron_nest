@@ -43,6 +43,7 @@ const rateLimitState = {
 // Store cron jobs for graceful shutdown
 const cronJobs = [];
 // Configure Web Push
+let vapidConfigured = false;
 if (CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PRIVATE_KEY) {
     try {
         webPush.setVapidDetails(
@@ -51,27 +52,28 @@ if (CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PRIVATE_KEY) {
             CONFIG.VAPID_PRIVATE_KEY
         );
         console.log('[Push Worker] ✅ VAPID configured successfully');
+        vapidConfigured = true;
     } catch (error) {
         console.error('[Push Worker] ❌ VAPID configuration failed:', error.message);
-        process.exit(1);
     }
 } else {
     console.error('[Push Worker] ❌ Missing VAPID keys');
-    process.exit(1);
+    console.error('[Push Worker] 🔍 Available env vars:', Object.keys(process.env).filter(k => k.includes('VAPID') || k.includes('SUPABASE')).join(', '));
 }
 // Initialize Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+let supabase;
 if (!supabaseUrl || !supabaseServiceKey) {
-    console.error('[Startup] ❌ Missing Supabase environment variables');
-    process.exit(1);
+    console.error('[Startup] ⚠️ Missing Supabase environment variables - cron functions will not work');
+} else {
+    supabase = createClient(supabaseUrl, supabaseServiceKey, {
+        auth: {
+            autoRefreshToken: false,
+            persistSession: false
+        }
+    });
 }
-const supabase = createClient(supabaseUrl, supabaseServiceKey, {
-    auth: {
-        autoRefreshToken: false,
-        persistSession: false
-    }
-});
 
 // Export CONFIG values for access in functions
 CONFIG.VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
@@ -363,14 +365,27 @@ const express = require('express');
 const app = express();
 
 app.get('/health', (req, res) => {
+    const hasVapid = !!(CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PRIVATE_KEY);
+    const hasSupabase = !!(supabaseUrl && supabaseServiceKey);
+    
     res.status(200).json({
-        status: 'healthy',
+        status: hasVapid && hasSupabase ? 'healthy' : 'degraded',
         timestamp: new Date().toISOString(),
         queueSize: rateLimitState.queueSize,
         config: {
             batchLimit: CONFIG.BATCH_LIMIT,
-            rateLimitMaxQueue: CONFIG.RATE_LIMIT_MAX_QUEUE
+            rateLimitMaxQueue: CONFIG.RATE_LIMIT_MAX_QUEUE,
+            vapidConfigured: hasVapid,
+            supabaseConfigured: hasSupabase
+        },
+        env: {
+            nodeVersion: process.version,
+            availableVars: Object.keys(process.env).filter(k => 
+                k.includes('VAPID') || k.includes('SUPABASE') || k === 'PORT' || k === 'NODE_ENV'
+            )
         }
+    });
+});
     });
 });
 
@@ -379,7 +394,8 @@ app.get('/ready', (req, res) => {
 });
 
 const server = app.listen(CONFIG.PORT, () => {
-    console.log(`[Health Check] Server listening on port ${CONFIG.PORT}`);
+    console.log(`[Health Check] ✅ Server listening on port ${CONFIG.PORT}`);
+    console.log(`[Health Check] 🔍 Health endpoint: http://localhost:${CONFIG.PORT}/health`);
 });
 
 // ============================================================================
@@ -387,29 +403,34 @@ const server = app.listen(CONFIG.PORT, () => {
 // ============================================================================
 console.log('🚀 Starting push notification cron service...');
 
-// Validate environment before starting crons
-validateEnvironment();
+// Only start crons if configuration is valid
+if (vapidConfigured && supabase) {
+    console.log('✅ Configuration valid - starting cron jobs');
+    
+    // Process push notifications every minute
+    cronJobs.push(cron.schedule('* * * * *', async () => {
+        try {
+            const result = await processPushNotifications();
+            console.log('[Cron] Push worker result:', result);
+        } catch (error) {
+            console.error('[Cron] Push worker error:', error.message);
+        }
+    }));
 
-// Process push notifications every minute
-cronJobs.push(cron.schedule('* * * * *', async () => {
-    try {
-        const result = await processPushNotifications();
-        console.log('[Cron] Push worker result:', result);
-    } catch (error) {
-        console.error('[Cron] Push worker error:', error.message);
-    }
-}));
+    // Run daily notifications every hour (will check time internally)
+    cronJobs.push(cron.schedule('0 * * * *', async () => {
+        try {
+            await runDailyNotifications();
+        } catch (error) {
+            console.error('[Cron] Daily notifications error:', error.message);
+        }
+    }));
 
-// Run daily notifications every hour (will check time internally)
-cronJobs.push(cron.schedule('0 * * * *', async () => {
-    try {
-        await runDailyNotifications();
-    } catch (error) {
-        console.error('[Cron] Daily notifications error:', error.message);
-    }
-}));
-
-console.log('✅ All push notification crons started');
+    console.log('✅ All push notification crons started');
+} else {
+    console.error('⚠️ Configuration incomplete - cron jobs NOT started');
+    console.error('⚠️ Fix environment variables and redeploy');
+}
 
 // ============================================================================
 // GRACEFUL SHUTDOWN
