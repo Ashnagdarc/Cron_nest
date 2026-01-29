@@ -31,7 +31,9 @@ const CONFIG = {
     RATE_LIMIT_WINDOW: parseInt(process.env.RATE_LIMIT_WINDOW || '60000', 10), // 1 minute in ms
     RATE_LIMIT_MAX_QUEUE: parseInt(process.env.RATE_LIMIT_MAX_QUEUE || '1000', 10),
     PORT: parseInt(process.env.PORT || '3000', 10),
-    VAPID_MAILTO: process.env.VAPID_MAILTO || 'mailto:noreply@nestbyeden.app'
+    VAPID_MAILTO: process.env.VAPID_MAILTO || 'mailto:noreply@nestbyeden.app',
+    VAPID_PUBLIC_KEY: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY
 };
 
 // Rate limiting state
@@ -75,9 +77,6 @@ if (!supabaseUrl || !supabaseServiceKey) {
     });
 }
 
-// Export CONFIG values for access in functions
-CONFIG.VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-CONFIG.VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 async function markFailed(notificationId, errorMessage) {
     await supabase
         .from('push_notification_queue')
