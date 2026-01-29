@@ -16,12 +16,12 @@ COPY index.js ./
 RUN addgroup -g 1001 -S nodejs && \
   adduser -S nestcron -u 1001
 # Change ownership of app directory
-RUN chown -R 
+RUN chown -R nestcron:nodejs /app
+USER nestcron
+# Expose port
 EXPOSE 3000
 # Health check via HTTP endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "console.log('Health check passed')"
 # Start the application
 CMD ["npm", "start"]
