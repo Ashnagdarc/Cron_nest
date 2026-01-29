@@ -386,8 +386,6 @@ app.get('/health', (req, res) => {
         }
     });
 });
-    });
-});
 
 app.get('/ready', (req, res) => {
     res.status(200).json({ ready: true });
